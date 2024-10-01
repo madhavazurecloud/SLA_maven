@@ -4,7 +4,7 @@ pipeline {
     stages {
         stage('Webhook') {
             steps {
-                echo 'THis pipeline for webhook'
+                echo 'THis pipeline for webhook Task'
             }
         }
     }
