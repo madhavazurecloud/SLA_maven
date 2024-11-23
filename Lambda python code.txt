@@ -1,0 +1,110 @@
+EBS Snapshots Delete
+================================================================================================================
+
+import boto3
+
+def lambda_handler(event, context):
+    ec2 = boto3.client('ec2')
+
+    # Get all EBS snapshots
+    response = ec2.describe_snapshots(OwnerIds=['self'])
+
+    # Get all active EC2 instance IDs
+    instances_response = ec2.describe_instances(Filters=[{'Name': 'instance-state-name', 'Values': ['running']}])
+    active_instance_ids = set()
+
+    for reservation in instances_response['Reservations']:
+        for instance in reservation['Instances']:
+            active_instance_ids.add(instance['InstanceId'])
+
+    # Iterate through each snapshot and delete if it's not attached to any volume or the volume is not attached to a running instance
+    for snapshot in response['Snapshots']:
+        snapshot_id = snapshot['SnapshotId']
+        volume_id = snapshot.get('VolumeId')
+
+        if not volume_id:
+            # Delete the snapshot if it's not attached to any volume
+            ec2.delete_snapshot(SnapshotId=snapshot_id)
+            print(f"Deleted EBS snapshot {snapshot_id} as it was not attached to any volume.")
+        else:
+            # Check if the volume still exists
+            try:
+                volume_response = ec2.describe_volumes(VolumeIds=[volume_id])
+                if not volume_response['Volumes'][0]['Attachments']:
+                    ec2.delete_snapshot(SnapshotId=snapshot_id)
+                    print(f"Deleted EBS snapshot {snapshot_id} as it was taken from a volume not attached to any running instance.")
+            except ec2.exceptions.ClientError as e:
+                if e.response['Error']['Code'] == 'InvalidVolume.NotFound':
+                    # The volume associated with the snapshot is not found (it might have been deleted)
+                    ec2.delete_snapshot(SnapshotId=snapshot_id)
+                    print(f"Deleted EBS snapshot {snapshot_id} as its associated volume was not found.")
+
+S3 Bucket Delete
+======================
+
+import boto3
+from datetime import datetime, timezone
+
+def lambda_handler(event, context):
+    s3 = boto3.client('s3')
+    cloudtrail = boto3.client('cloudtrail')
+    now = datetime.now(timezone.utc)
+    delete_threshold = now.timestamp() - (30 * 60)  # 30 minutes in seconds
+
+    # Get the list of all buckets
+    response = s3.list_buckets()
+    buckets = response.get('Buckets', [])
+    
+    for bucket in buckets:
+        bucket_name = bucket['Name']
+        creation_date = bucket['CreationDate']
+        
+        # Skip buckets created within the last 30 minutes
+        if creation_date.timestamp() > delete_threshold:
+            continue
+
+        # Check if the bucket is empty
+        try:
+            objects = s3.list_objects_v2(Bucket=bucket_name)
+            if 'Contents' in objects:  # The bucket is not empty
+                continue
+        except Exception as e:
+            print(f"Error checking contents for bucket {bucket_name}: {e}")
+            continue
+
+        # Check bucket activity (last access/modification using CloudTrail)
+        try:
+            events = cloudtrail.lookup_events(
+                LookupAttributes=[
+                    {'AttributeKey': 'ResourceName', 'AttributeValue': bucket_name}
+                ],
+                StartTime=datetime.fromtimestamp(delete_threshold, timezone.utc),
+                EndTime=now
+            )
+            if events['Events']:
+                # Bucket has been accessed or modified within the threshold
+                continue
+        except Exception as e:
+            print(f"Error checking activity for bucket {bucket_name}: {e}")
+            continue
+
+        # Delete the bucket if conditions are met
+        try:
+            s3.delete_bucket(Bucket=bucket_name)
+            print(f"Deleted bucket: {bucket_name}")
+        except Exception as e:
+            print(f"Error deleting bucket {bucket_name}: {e}")
+
+
+---------------
+policy attach for Role
+
+S3
+***
+Listbucket
+DeleteBucket
+ListAllbucket
+
+Cloud Trail
+************
+LookupEvents
